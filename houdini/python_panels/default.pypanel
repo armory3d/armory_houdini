@@ -1,0 +1,145 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<pythonPanelDocument>
+  <!-- This file contains definitions of Python interfaces and the
+ interfaces menu.  It should not be hand-edited when it is being
+ used by the application.  Note, that two definitions of the
+ same interface or of the interfaces menu are not allowed
+ in a single file. -->
+  <interface name="interface2" label="New Python Interface" icon="MISC_python" help_url="">
+    <script><![CDATA[# Houdini to Armory exporter test
+import hou
+from hou import hipFile
+from hutil.Qt import QtWidgets
+import json
+import os
+
+def armory_export():
+    
+    p = os.path.dirname(hipFile.path())
+    n = hipFile.basename().split('.')[0]
+
+    raw = {}
+    raw['name'] = n
+    
+    raw['shader_datas'] = []
+    raw['material_datas'] = []
+    
+    raw['camera_datas'] = []
+    raw['lamp_datas'] = []
+    raw['mesh_datas'] = []
+    
+    raw['objects'] = []
+    
+    for object in hou.node("/obj").children():
+        o = {}
+        raw['objects'].append(o)
+        
+        d = {}
+        raw['mesh_datas'].append(d)
+        
+        d['name'] = object.name() + '_data'
+        d['vertex_arrays'] = []
+        d['index_arrays'] = []
+        va = {}
+        va['attrib'] = 'pos'
+        va['values'] = []
+        d['vertex_arrays'].append(va)
+        ia = {}
+        ia['material'] = 0
+        ia['values'] = []
+        d['index_arrays'].append(ia)
+        
+        for point in object.displayNode().geometry().points():
+            pos = point.position()
+            va['values'].append(pos.x())
+            va['values'].append(pos.y())
+            va['values'].append(pos.z())
+    
+        for i in range(0, len(va['values']) / 3):
+            ia['values'].append(i)
+            
+        o['name'] = object.name()
+        o['type'] = 'mesh_object'
+        o['data_ref'] = object.name() + '_data'
+        
+        t = {}
+        t['values'] = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]
+        o['transform'] = t
+        
+    fp_build = p + '/build_' + n
+    
+    if not os.path.exists(fp_build + '/compiled/Assets'):
+        os.makedirs(fp_build + '/compiled/Assets')
+    
+    out_path = fp_build + '/compiled/Assets/' + n + '.json'
+    with open(out_path, 'w') as f:
+        f.write(json.dumps(raw, sort_keys=True, indent=4))
+    
+    # Write Main
+    if not os.path.exists(p + '/Sources'):
+        os.makedirs(p + '/Sources')
+    
+    with open(p + '/Sources/Main.hx', 'w') as f:
+        f.write("""
+// Auto-generated
+package ;
+class Main {
+    public static inline var projectName = 'untitled';
+    public static inline var projectPackage = 'arm';
+    public static function main() {
+        if (armory.data.Config.raw == null) armory.data.Config.raw = { };
+        var config = armory.data.Config.raw;
+        if (config.window_mode == null) config.window_mode = 0;
+        if (config.window_resizable == null) config.window_resizable = false;
+        if (config.window_minimizable == null) config.window_minimizable = true;
+        if (config.window_maximizable == null) config.window_maximizable = false;
+        if (config.window_w == null) config.window_w = 960;
+        if (config.window_h == null) config.window_h = 540;
+        if (config.window_msaa == null) config.window_msaa = 1;
+        if (config.window_vsync == null) config.window_vsync = true;
+        var windowMode = config.window_mode == 0 ? kha.WindowMode.Window : (config.window_mode == 1 ? kha.WindowMode.BorderlessWindow : kha.WindowMode.Fullscreen);
+        if (windowMode == kha.WindowMode.Fullscreen) { windowMode = kha.WindowMode.BorderlessWindow; config.window_w = kha.Display.width(0); config.window_h = kha.Display.height(0); }
+        else { config.window_w = Std.int(Math.min(config.window_w, kha.Display.width(0))); config.window_h = Std.int(Math.min(config.window_h, kha.Display.height(0))); }
+        armory.object.Uniforms.register();
+        kha.System.init({title: projectName, width: config.window_w, height: config.window_h, samplesPerPixel: config.window_msaa, vSync: config.window_vsync, windowMode: windowMode, resizable: config.window_resizable, maximizable: config.window_maximizable, minimizable: config.window_minimizable}, function() {
+            iron.App.init(function() {
+                iron.Scene.setActive('""" + n + """.json', function(object:iron.object.Object) {
+                    iron.RenderPath.setActive(armory.renderpath.RenderPathCreator.get());
+                });
+            });
+        });
+    }
+}
+""")
+        
+    # Write khafile
+    with open(p + '/khafile.js', 'w') as f:
+        f.write("""
+// Auto-generated
+let project = new Project('""" + n + """');
+project.addSources('Sources');
+project.addLibrary("armsdk/armory");
+project.addLibrary("armsdk/iron");
+project.addAssets("compiled/Assets/**", { notinlist: true });
+project.addDefine('rp_renderer=Forward');
+project.addDefine('arm_json');
+resolve(project);
+""")
+
+def onCreateInterface():
+
+    root_widget = QtWidgets.QWidget()
+    layout = QtWidgets.QVBoxLayout()
+    
+    button = QtWidgets.QPushButton("Armory Build")
+    button.clicked.connect(armory_export)
+    
+    layout.addWidget(button)
+    
+    root_widget.setLayout(layout)
+    return root_widget
+]]></script>
+    <includeInToolbarMenu menu_position="101" create_separator="false"/>
+    <help><![CDATA[]]></help>
+  </interface>
+</pythonPanelDocument>
