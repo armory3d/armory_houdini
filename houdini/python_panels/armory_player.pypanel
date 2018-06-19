@@ -1,0 +1,490 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<pythonPanelDocument>
+  <!-- This file contains definitions of Python interfaces and the
+ interfaces menu.  It should not be hand-edited when it is being
+ used by the application.  Note, that two definitions of the
+ same interface or of the interfaces menu are not allowed
+ in a single file. -->
+  <interface name="armory_player" label="Armory Player" icon="MISC_python" help_url="">
+    <script><![CDATA[# Houdini to Armory exporter example
+# https://github.com/armory3d/armory_houdini
+
+import hou
+from hou import hipFile
+from hutil.Qt import QtWidgets
+import os
+import threading
+import subprocess
+
+textBox = None
+
+def sdk_path():
+    # Enter path to armsdk in the textBox
+    global textBox
+    return str(textBox.toPlainText()).replace('\\', '/')
+    
+def hip_path():
+    # Project location
+    return os.path.dirname(hipFile.path())
+    
+def hip_name():
+    # Project file name
+    return hipFile.basename().split('.')[0]
+    
+def build_dir():
+    # Build directory name
+    return 'build_' + hip_name()
+    
+def fp_build():
+    # Path to build directory
+    return hip_path() + '/' + build_dir()
+
+def write_arm(filepath, output):
+    # Save data into .arm file
+    with open(filepath, 'wb') as f:
+        f.write(packb(output))
+    
+def run_thread(cmd, done):
+    def fn():
+        subprocess.Popen(cmd).wait()
+        done()
+        return
+    threading.Thread(target=fn).start()
+
+def write_matrix(m):
+    # Write hou.Matrix4 into a float array
+    return [m.at(0, 0), m.at(1, 0), m.at(2, 0), m.at(3, 0),\
+            m.at(0, 1), m.at(1, 1), m.at(2, 1), m.at(3, 1),\
+            m.at(0, 2), m.at(1, 2), m.at(2, 2), m.at(3, 2),\
+            m.at(0, 3), m.at(1, 3), m.at(2, 3), m.at(3, 3)]
+    
+def armory_export():
+    # Start writing the scene file
+    # https://github.com/armory3d/iron/blob/master/Sources/iron/data/SceneFormat.hx
+    raw = {}
+    raw['name'] = hip_name()
+    raw['material_datas'] = []
+    raw['camera_datas'] = []
+    raw['lamp_datas'] = []
+    raw['mesh_datas'] = []
+    raw['objects'] = []
+    
+    # Export scene objects
+    for object in hou.node("/obj").children():
+        #! Assume meshes only for now
+        # Write mesh data of current object
+        md = {}
+        raw['mesh_datas'].append(md)
+        md['name'] = object.name() + '_data'
+        md['vertex_arrays'] = []
+        md['index_arrays'] = []
+        # Position array
+        pa = {}
+        pa['attrib'] = 'pos'
+        pa['values'] = []
+        md['vertex_arrays'].append(pa)
+        # Normal array
+        na = {}
+        na['attrib'] = 'nor'
+        na['values'] = []
+        md['vertex_arrays'].append(na)
+        # Index array
+        ia = {}
+        ia['material'] = 0
+        ia['values'] = []
+        md['index_arrays'].append(ia)
+        
+        def write_vert(pos, nor):
+            # Store position and normal into vertex arrays
+            pa['values'].append(pos.x())
+            pa['values'].append(pos.y())
+            pa['values'].append(pos.z())
+            na['values'].append(nor.x())
+            na['values'].append(nor.y())
+            na['values'].append(nor.z())
+        
+        # Write vertex attributes
+        for prim in object.displayNode().geometry().prims():
+            nor = prim.normal()
+            verts = prim.vertices()
+            # Turn quad into two triangles
+            if len(verts) == 4:
+                write_vert(verts[0].point().position(), nor)
+                write_vert(verts[1].point().position(), nor)
+                write_vert(verts[2].point().position(), nor)
+                write_vert(verts[2].point().position(), nor)
+                write_vert(verts[3].point().position(), nor)
+                write_vert(verts[0].point().position(), nor)
+    
+        # Write indices
+        for i in range(0, len(pa['values']) / 3):
+            ia['values'].append(i)
+        
+        # Append current object
+        obj = {}
+        raw['objects'].append(obj)
+        obj['name'] = object.name()
+        obj['type'] = 'mesh_object'
+        # Reference to mesh data
+        obj['data_ref'] = object.name() + '_data'
+        # Assigned materials
+        obj['material_refs'] = ['Material']
+        obj['transform'] = {'values': write_matrix(object.worldTransform())}
+    
+    # Create materials
+    #! Just output a default material for now
+    mat = {}
+    raw['material_datas'].append(mat)
+    mat['name'] = 'Material'
+    mat['shader'] = 'Material_data.json/Material_data'
+    mat['contexts'] = []
+    con = {}
+    mat['contexts'].append(con)
+    con['name'] = 'mesh'
+    con['bind_textures'] = []
+    con['bind_constants'] = []
+    
+    # Create camera data
+    cam = {}
+    raw['camera_datas'].append(cam)
+    cam['name'] = 'Camera'
+    cam['near_plane'] = 0.1
+    cam['far_plane'] = 100.0
+    cam['fov'] = 0.935
+    cam['frustum_culling'] = True
+    cam['clear_color'] = [0.2, 0.2, 0.2, 1.0]
+
+    # Create camera object
+    cam = {}
+    raw['objects'].append(cam)
+    cam['name'] = 'Camera'
+    cam['type'] = 'camera_object'
+    cam['data_ref'] = 'Camera'
+    # Get viewport matrix
+    pane = hou.ui.curDesktop().paneTabOfType(hou.paneTabType.SceneViewer)
+    vt = pane.curViewport().viewTransform()
+    cam['transform'] = {'values': write_matrix(vt)}
+    # Attach WalkNavigation to the camera
+    cam['traits'] = []
+    t = {}
+    cam['traits'].append(t)
+    t['type'] = 'Script'
+    t['class_name'] = 'armory.trait.WalkNavigation'
+    raw['camera_ref'] = 'Camera'
+    
+    # Write scene .arm file
+    if not os.path.exists(fp_build() + '/compiled/Assets'):
+        os.makedirs(fp_build() + '/compiled/Assets')
+    
+    out_path = fp_build() + '/compiled/Assets/' + hip_name() + '.arm'
+    write_arm(out_path, raw)
+        
+    # Write shader data
+    if not os.path.exists(fp_build() + '/compiled/Shaders'):
+        os.makedirs(fp_build() + '/compiled/Shaders')
+    
+    #! Not parsing houdini materials yet, just output default shader
+    m = {}
+    m['shader_datas'] = []
+    sd = {}
+    m['shader_datas'].append(sd)
+    sd['name'] = 'Material_data'
+    sd['contexts'] = []
+    c = {}
+    sd['contexts'].append(c)
+    c['name'] = 'mesh'
+    c['compare_mode'] = 'less'
+    c['cull_mode'] = 'none'
+    #c['cull_mode'] = 'clockwise'
+    c['depth_write'] = True
+    c['texture_units'] = []
+    c['vertex_shader'] = 'Material_mesh.vert'
+    c['fragment_shader'] = 'Material_mesh.frag'
+    c['vertex_structure'] = [{'name': 'pos', 'size': 3}, {'name': 'nor', 'size': 3}]
+    c['constants'] = [{'name': 'WVP', 'type': 'mat4', 'link': '_worldViewProjectionMatrix'},\
+                      {'name': 'N', 'type': 'mat3', 'link': '_normalMatrix'}]
+    
+    out_path = fp_build() + '/compiled/Assets/Material_data.json'
+    write_arm(out_path, m)
+    
+    # Default vertex shader
+    vs = """#version 450
+in vec3 pos;
+in vec3 nor;
+uniform mat4 WVP;
+uniform mat3 N;
+out vec3 wnormal;
+void main() {
+    vec4 spos = vec4(pos, 1.0);
+    wnormal = normalize(N * nor);
+    gl_Position = WVP * spos;
+}
+"""
+
+    # Default fragment shader
+    fs = """#version 450
+in vec3 wnormal;
+out vec4 fragColor;
+void main() {
+    vec3 n = normalize(wnormal);
+    vec3 l = vec3(-0.3, 0.3, 0.3);
+    vec3 basecol = vec3(0.8, 0.8, 0.8);
+    fragColor = vec4(basecol * max(dot(n, l) + vec3(0.2, 0.2, 0.2), 0.0), 1.0);
+}
+"""
+
+    # Write shaders
+    out_path = fp_build() + '/compiled/Shaders/Material_mesh'
+    with open(out_path + '.vert.glsl', 'w') as f:
+        f.write(vs)
+    with open(out_path + '.frag.glsl', 'w') as f:
+        f.write(fs)
+        
+    # Write Main.hx
+    if not os.path.exists(hip_path() + '/Sources'):
+        os.makedirs(hip_path() + '/Sources')
+    
+    with open(hip_path() + '/Sources/Main.hx', 'w') as f:
+        f.write("""
+// Auto-generated
+package ;
+class Main {
+    public static inline var projectName = 'untitled';
+    public static inline var projectPackage = 'arm';
+    public static function main() {
+        if (armory.data.Config.raw == null) armory.data.Config.raw = { };
+        var config = armory.data.Config.raw;
+        if (config.window_mode == null) config.window_mode = 0;
+        if (config.window_resizable == null) config.window_resizable = false;
+        if (config.window_minimizable == null) config.window_minimizable = true;
+        if (config.window_maximizable == null) config.window_maximizable = false;
+        if (config.window_w == null) config.window_w = 960;
+        if (config.window_h == null) config.window_h = 540;
+        if (config.window_msaa == null) config.window_msaa = 1;
+        if (config.window_vsync == null) config.window_vsync = true;
+        var windowMode = config.window_mode == 0 ? kha.WindowMode.Window : (config.window_mode == 1 ? kha.WindowMode.BorderlessWindow : kha.WindowMode.Fullscreen);
+        if (windowMode == kha.WindowMode.Fullscreen) { windowMode = kha.WindowMode.BorderlessWindow; config.window_w = kha.Display.width(0); config.window_h = kha.Display.height(0); }
+        else { config.window_w = Std.int(Math.min(config.window_w, kha.Display.width(0))); config.window_h = Std.int(Math.min(config.window_h, kha.Display.height(0))); }
+        armory.object.Uniforms.register();
+        kha.System.init({title: projectName, width: config.window_w, height: config.window_h, samplesPerPixel: config.window_msaa, vSync: config.window_vsync, windowMode: windowMode, resizable: config.window_resizable, maximizable: config.window_maximizable, minimizable: config.window_minimizable}, function() {
+            iron.App.init(function() {
+                iron.Scene.setActive('""" + hip_name() + """', function(object:iron.object.Object) {
+                    iron.RenderPath.setActive(armory.renderpath.RenderPathCreator.get());
+                });
+            });
+        });
+    }
+}
+""")
+        
+    # Write khafile.js
+    with open(hip_path() + '/khafile.js', 'w') as f:
+        f.write("""
+// Auto-generated
+let project = new Project('""" + hip_name() + """');
+project.addSources('Sources');
+project.addLibrary('""" + sdk_path() + """/armory');
+project.addLibrary('""" + sdk_path() + """/iron');
+project.addAssets('build_""" + hip_name() + """/compiled/Assets/**', { notinlist: true });
+project.addShaders('build_""" + hip_name() + """/compiled/Shaders/**');
+project.addDefine('rp_renderer=Forward');
+project.addDefine('rp_background=Clear');
+project.addDefine('rp_gi=Off');
+project.addDefine('rp_ssgi=Off');
+project.addDefine('arm_yaxisup');
+project.addParameter('armory.trait.WalkNavigation');
+project.addParameter("--macro keep('armory.trait.WalkNavigation')");
+resolve(project);
+""")
+
+def on_compiled():
+    # Play in Krom
+    #platform.system()
+    krom_location = sdk_path() + '/Krom/win32'
+    krom_path = sdk_path() + '/Krom/win32/Krom.exe'
+    os.chdir(krom_location)
+    cmd = [krom_path, fp_build() + '/krom', fp_build() + '/krom-resources']
+    subprocess.Popen(cmd)
+
+def armory_play():
+    armory_export()
+    
+    # Compile project using node Kha/make
+    #platform.system()
+    node_path = sdk_path() + '/nodejs/node.exe'
+    khamake_path = sdk_path() + '/Kha/make'
+    os.chdir(hip_path())
+    cmd = [node_path, khamake_path, 'krom', '--to', build_dir(), '-g', 'opengl']
+    run_thread(cmd, on_compiled)
+
+def onCreateInterface():
+    # Python panel UI
+    global textBox
+    layout = QtWidgets.QVBoxLayout()
+
+    textBox = QtWidgets.QTextEdit("Enter /armsdk path here")
+    layout.addWidget(textBox)
+    
+    button = QtWidgets.QPushButton("Armory Play")
+    button.clicked.connect(armory_play)
+    layout.addWidget(button)
+    
+    root = QtWidgets.QWidget()
+    root.setLayout(layout)
+    return root
+
+# Msgpack parser with typed arrays
+# Based on u-msgpack-python v2.4.1 - v at sergeev.io
+# https://github.com/vsergeev/u-msgpack-python
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in
+# all copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+# THE SOFTWARE.
+#
+import struct
+import io
+
+def _pack_integer(obj, fp):
+    if obj < 0:
+        if obj >= -32:
+            fp.write(struct.pack("b", obj))
+        elif obj >= -2**(8 - 1):
+            fp.write(b"\xd0" + struct.pack("b", obj))
+        elif obj >= -2**(16 - 1):
+            fp.write(b"\xd1" + struct.pack(">h", obj))
+        elif obj >= -2**(32 - 1):
+            fp.write(b"\xd2" + struct.pack(">i", obj))
+        elif obj >= -2**(64 - 1):
+            fp.write(b"\xd3" + struct.pack(">q", obj))
+        else:
+            raise Exception("huge signed int")
+    else:
+        if obj <= 127:
+            fp.write(struct.pack("B", obj))
+        elif obj <= 2**8 - 1:
+            fp.write(b"\xcc" + struct.pack("B", obj))
+        elif obj <= 2**16 - 1:
+            fp.write(b"\xcd" + struct.pack(">H", obj))
+        elif obj <= 2**32 - 1:
+            fp.write(b"\xce" + struct.pack(">I", obj))
+        elif obj <= 2**64 - 1:
+            fp.write(b"\xcf" + struct.pack(">Q", obj))
+        else:
+            raise Exception("huge unsigned int")
+
+def _pack_nil(obj, fp):
+    fp.write(b"\xc0")
+
+def _pack_boolean(obj, fp):
+    fp.write(b"\xc3" if obj else b"\xc2")
+
+def _pack_float(obj, fp):
+    # NOTE: forced 32-bit floats for Armory
+    # fp.write(b"\xcb" + struct.pack(">d", obj)) # Double
+    fp.write(b"\xca" + struct.pack(">f", obj))
+
+def _pack_string(obj, fp):
+    obj = obj.encode('utf-8')
+    if len(obj) <= 31:
+        fp.write(struct.pack("B", 0xa0 | len(obj)) + obj)
+    elif len(obj) <= 2**8 - 1:
+        fp.write(b"\xd9" + struct.pack("B", len(obj)) + obj)
+    elif len(obj) <= 2**16 - 1:
+        fp.write(b"\xda" + struct.pack(">H", len(obj)) + obj)
+    elif len(obj) <= 2**32 - 1:
+        fp.write(b"\xdb" + struct.pack(">I", len(obj)) + obj)
+    else:
+        raise Exception("huge string")
+
+def _pack_binary(obj, fp):
+    if len(obj) <= 2**8 - 1:
+        fp.write(b"\xc4" + struct.pack("B", len(obj)) + obj)
+    elif len(obj) <= 2**16 - 1:
+        fp.write(b"\xc5" + struct.pack(">H", len(obj)) + obj)
+    elif len(obj) <= 2**32 - 1:
+        fp.write(b"\xc6" + struct.pack(">I", len(obj)) + obj)
+    else:
+        raise Exception("huge binary string")
+
+def _pack_array(obj, fp):
+    if len(obj) <= 15:
+        fp.write(struct.pack("B", 0x90 | len(obj)))
+    elif len(obj) <= 2**16 - 1:
+        fp.write(b"\xdc" + struct.pack(">H", len(obj)))
+    elif len(obj) <= 2**32 - 1:
+        fp.write(b"\xdd" + struct.pack(">I", len(obj)))
+    else:
+        raise Exception("huge array")
+
+    # Float32
+    if len(obj) > 0 and isinstance(obj[0], float):
+        fp.write(b"\xca")
+        for e in obj:
+            fp.write(struct.pack(">f", e))
+    # Int32
+    elif len(obj) > 0 and isinstance(obj[0], int):
+        fp.write(b"\xd2")
+        for e in obj:
+            fp.write(struct.pack(">i", e))
+    # Regular
+    else:
+        for e in obj:
+            pack(e, fp)
+
+def _pack_map(obj, fp):
+    if len(obj) <= 15:
+        fp.write(struct.pack("B", 0x80 | len(obj)))
+    elif len(obj) <= 2**16 - 1:
+        fp.write(b"\xde" + struct.pack(">H", len(obj)))
+    elif len(obj) <= 2**32 - 1:
+        fp.write(b"\xdf" + struct.pack(">I", len(obj)))
+    else:
+        raise Exception("huge array")
+
+    for k, v in obj.items():
+        pack(k, fp)
+        pack(v, fp)
+
+def pack(obj, fp):
+    if obj is None:
+        _pack_nil(obj, fp)
+    elif isinstance(obj, bool):
+        _pack_boolean(obj, fp)
+    elif isinstance(obj, int):
+        _pack_integer(obj, fp)
+    elif isinstance(obj, float):
+        _pack_float(obj, fp)
+    elif isinstance(obj, str):
+        _pack_string(obj, fp)
+    elif isinstance(obj, bytes):
+        _pack_binary(obj, fp)
+    elif isinstance(obj, list) or isinstance(obj, tuple):
+        _pack_array(obj, fp)
+    elif isinstance(obj, dict):
+        _pack_map(obj, fp)
+    else:
+        raise Exception("unsupported type: %s" % str(type(obj)))
+
+def packb(obj):
+    fp = io.BytesIO()
+    pack(obj, fp)
+    return fp.getvalue()]]></script>
+    <includeInPaneTabMenu menu_position="0" create_separator="false"/>
+    <includeInToolbarMenu menu_position="0" create_separator="false"/>
+    <help><![CDATA[]]></help>
+  </interface>
+</pythonPanelDocument>
