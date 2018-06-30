@@ -15,6 +15,7 @@ from hutil.Qt import QtWidgets
 import os
 import threading
 import subprocess
+import json
 
 textBox = None
 
@@ -43,6 +44,8 @@ def write_arm(filepath, output):
     # Save data into .arm file
     with open(filepath, 'wb') as f:
         f.write(packb(output))
+    # with open(filepath + '_debug.json', 'w') as f:
+        # f.write(json.dumps(output, sort_keys=True, indent=4))
     
 def run_thread(cmd, done):
     def fn():
@@ -57,8 +60,91 @@ def write_matrix(m):
             m.at(0, 1), m.at(1, 1), m.at(2, 1), m.at(3, 1),\
             m.at(0, 2), m.at(1, 2), m.at(2, 2), m.at(3, 2),\
             m.at(0, 3), m.at(1, 3), m.at(2, 3), m.at(3, 3)]
+
+def write_material(matnode):
+    #! Assume principled shader
+
+    mat = {}
+    mat['name'] = matnode.name()
+    mat['shader'] = matnode.name() + '_data.arm/' + matnode.name() + '_data'
+    mat['contexts'] = []
+    con = {}
+    mat['contexts'].append(con)
+    con['name'] = 'mesh'
+    con['bind_textures'] = []
+    con['bind_constants'] = []
     
+    m = {}
+    m['shader_datas'] = []
+    sd = {}
+    m['shader_datas'].append(sd)
+    sd['name'] = matnode.name() + '_data'
+    sd['contexts'] = []
+    c = {}
+    sd['contexts'].append(c)
+    c['name'] = 'mesh'
+    c['compare_mode'] = 'less'
+    c['cull_mode'] = 'none'
+    #c['cull_mode'] = 'clockwise'
+    c['depth_write'] = True
+    c['texture_units'] = []
+    c['vertex_shader'] = matnode.name() + '_mesh.vert'
+    c['fragment_shader'] = matnode.name() + '_mesh.frag'
+    c['vertex_structure'] = [{'name': 'pos', 'size': 3}, {'name': 'nor', 'size': 3}]
+    c['constants'] = [{'name': 'WVP', 'type': 'mat4', 'link': '_worldViewProjectionMatrix'},\
+                      {'name': 'N', 'type': 'mat3', 'link': '_normalMatrix'}]
+    
+    out_path = fp_build() + '/compiled/Assets/' + matnode.name() + '_data.arm'
+    write_arm(out_path, m)
+    
+    # Default vertex shader
+    vs = """#version 450
+in vec3 pos;
+in vec3 nor;
+uniform mat4 WVP;
+uniform mat3 N;
+out vec3 wnormal;
+void main() {
+    vec4 spos = vec4(pos, 1.0);
+    wnormal = normalize(N * nor);
+    gl_Position = WVP * spos;
+}
+"""
+
+    # Default fragment shader
+    basecol = matnode.evalParmTuple('basecolor')
+    fs = """#version 450
+in vec3 wnormal;
+out vec4 fragColor;
+void main() {
+    vec3 n = normalize(wnormal);
+    vec3 l = vec3(-0.3, 0.3, 0.3);
+    vec3 basecol = vec3""" + str(basecol) + """;
+    fragColor = vec4(basecol * max(dot(n, l) + vec3(0.2, 0.2, 0.2), 0.0), 1.0);
+}
+"""
+
+    # Write shaders
+    out_path = fp_build() + '/compiled/Shaders/' + matnode.name() + '_mesh'
+    with open(out_path + '.vert.glsl', 'w') as f:
+        f.write(vs)
+    with open(out_path + '.frag.glsl', 'w') as f:
+        f.write(fs)
+
+    return mat
+
 def armory_export():
+
+    if not os.path.exists(fp_build() + '/compiled/Assets'):
+        os.makedirs(fp_build() + '/compiled/Assets')
+
+    if not os.path.exists(hip_path() + '/Sources'):
+        os.makedirs(hip_path() + '/Sources')
+
+    # Write shader data
+    if not os.path.exists(fp_build() + '/compiled/Shaders'):
+        os.makedirs(fp_build() + '/compiled/Shaders')
+
     # Start writing the scene file
     # https://github.com/armory3d/iron/blob/master/Sources/iron/data/SceneFormat.hx
     raw = {}
@@ -70,12 +156,12 @@ def armory_export():
     raw['objects'] = []
     
     # Export scene objects
-    for object in hou.node("/obj").children():
+    for objnode in hou.node("/obj").children():
         #! Assume meshes only for now
         # Write mesh data of current object
         md = {}
         raw['mesh_datas'].append(md)
-        md['name'] = object.name() + '_data'
+        md['name'] = objnode.name() + '_data'
         md['vertex_arrays'] = []
         md['index_arrays'] = []
         # Position array
@@ -104,7 +190,7 @@ def armory_export():
             na['values'].append(nor.z())
         
         # Write vertex attributes
-        for prim in object.displayNode().geometry().prims():
+        for prim in objnode.displayNode().geometry().prims():
             nor = prim.normal()
             verts = prim.vertices()
             # Turn quad into two triangles
@@ -123,26 +209,21 @@ def armory_export():
         # Append current object
         obj = {}
         raw['objects'].append(obj)
-        obj['name'] = object.name()
+        obj['name'] = objnode.name()
         obj['type'] = 'mesh_object'
         # Reference to mesh data
-        obj['data_ref'] = object.name() + '_data'
+        obj['data_ref'] = objnode.name() + '_data'
         # Assigned materials
-        obj['material_refs'] = ['Material']
-        obj['transform'] = {'values': write_matrix(object.worldTransform())}
-    
-    # Create materials
-    #! Just output a default material for now
-    mat = {}
-    raw['material_datas'].append(mat)
-    mat['name'] = 'Material'
-    mat['shader'] = 'Material_data.json/Material_data'
-    mat['contexts'] = []
-    con = {}
-    mat['contexts'].append(con)
-    con['name'] = 'mesh'
-    con['bind_textures'] = []
-    con['bind_constants'] = []
+        matnode = None
+        for ref in objnode.references():
+            if type(ref) == hou.VopNode:
+                matnode = ref
+                break
+        if matnode != None:
+            mat = write_material(matnode)
+            raw['material_datas'].append(mat)
+            obj['material_refs'] = [matnode.name()]
+        obj['transform'] = {'values': write_matrix(objnode.worldTransform())}
     
     # Create camera data
     cam = {}
@@ -173,77 +254,10 @@ def armory_export():
     raw['camera_ref'] = 'Camera'
     
     # Write scene .arm file
-    if not os.path.exists(fp_build() + '/compiled/Assets'):
-        os.makedirs(fp_build() + '/compiled/Assets')
-    
     out_path = fp_build() + '/compiled/Assets/' + hip_name() + '.arm'
     write_arm(out_path, raw)
-        
-    # Write shader data
-    if not os.path.exists(fp_build() + '/compiled/Shaders'):
-        os.makedirs(fp_build() + '/compiled/Shaders')
-    
-    #! Not parsing houdini materials yet, just output default shader
-    m = {}
-    m['shader_datas'] = []
-    sd = {}
-    m['shader_datas'].append(sd)
-    sd['name'] = 'Material_data'
-    sd['contexts'] = []
-    c = {}
-    sd['contexts'].append(c)
-    c['name'] = 'mesh'
-    c['compare_mode'] = 'less'
-    c['cull_mode'] = 'none'
-    #c['cull_mode'] = 'clockwise'
-    c['depth_write'] = True
-    c['texture_units'] = []
-    c['vertex_shader'] = 'Material_mesh.vert'
-    c['fragment_shader'] = 'Material_mesh.frag'
-    c['vertex_structure'] = [{'name': 'pos', 'size': 3}, {'name': 'nor', 'size': 3}]
-    c['constants'] = [{'name': 'WVP', 'type': 'mat4', 'link': '_worldViewProjectionMatrix'},\
-                      {'name': 'N', 'type': 'mat3', 'link': '_normalMatrix'}]
-    
-    out_path = fp_build() + '/compiled/Assets/Material_data.json'
-    write_arm(out_path, m)
-    
-    # Default vertex shader
-    vs = """#version 450
-in vec3 pos;
-in vec3 nor;
-uniform mat4 WVP;
-uniform mat3 N;
-out vec3 wnormal;
-void main() {
-    vec4 spos = vec4(pos, 1.0);
-    wnormal = normalize(N * nor);
-    gl_Position = WVP * spos;
-}
-"""
 
-    # Default fragment shader
-    fs = """#version 450
-in vec3 wnormal;
-out vec4 fragColor;
-void main() {
-    vec3 n = normalize(wnormal);
-    vec3 l = vec3(-0.3, 0.3, 0.3);
-    vec3 basecol = vec3(0.8, 0.8, 0.8);
-    fragColor = vec4(basecol * max(dot(n, l) + vec3(0.2, 0.2, 0.2), 0.0), 1.0);
-}
-"""
-
-    # Write shaders
-    out_path = fp_build() + '/compiled/Shaders/Material_mesh'
-    with open(out_path + '.vert.glsl', 'w') as f:
-        f.write(vs)
-    with open(out_path + '.frag.glsl', 'w') as f:
-        f.write(fs)
-        
     # Write Main.hx
-    if not os.path.exists(hip_path() + '/Sources'):
-        os.makedirs(hip_path() + '/Sources')
-    
     with open(hip_path() + '/Sources/Main.hx', 'w') as f:
         f.write("""
 // Auto-generated
@@ -482,7 +496,8 @@ def pack(obj, fp):
 def packb(obj):
     fp = io.BytesIO()
     pack(obj, fp)
-    return fp.getvalue()]]></script>
+    return fp.getvalue()
+]]></script>
     <includeInPaneTabMenu menu_position="0" create_separator="false"/>
     <includeInToolbarMenu menu_position="0" create_separator="false"/>
     <help><![CDATA[]]></help>
