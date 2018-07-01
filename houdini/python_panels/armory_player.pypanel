@@ -118,9 +118,9 @@ in vec3 wnormal;
 out vec4 fragColor;
 void main() {
     vec3 n = normalize(wnormal);
-    vec3 l = vec3(-0.3, 0.3, 0.3);
+    vec3 l = vec3(0.3, 1.0, 0.6);
     vec3 basecol = vec3""" + str(basecol) + """;
-    fragColor = vec4(basecol * max(dot(n, l) + vec3(0.2, 0.2, 0.2), 0.0), 1.0);
+    fragColor = vec4(basecol * clamp(dot(n, l), 0.0, 1.0) + vec3(0.1, 0.1, 0.1), 1.0);
 }
 """
 
@@ -132,6 +132,88 @@ void main() {
         f.write(fs)
 
     return mat
+
+def write_mesh(objnode, raw):
+    # Write mesh data of current object
+    md = {}
+    raw['mesh_datas'].append(md)
+    md['name'] = objnode.name() + '_data'
+    md['vertex_arrays'] = []
+    md['index_arrays'] = []
+    # Position array
+    pa = {}
+    pa['attrib'] = 'pos'
+    pa['values'] = []
+    md['vertex_arrays'].append(pa)
+    # Normal array
+    na = {}
+    na['attrib'] = 'nor'
+    na['values'] = []
+    md['vertex_arrays'].append(na)
+    # Index array
+    ia = {}
+    ia['material'] = 0
+    ia['values'] = []
+    md['index_arrays'].append(ia)
+    
+    def write_vert(pos, nor):
+        # Store position and normal into vertex arrays
+        pa['values'].append(pos.x())
+        pa['values'].append(pos.y())
+        pa['values'].append(pos.z())
+        na['values'].append(nor.x())
+        na['values'].append(nor.y())
+        na['values'].append(nor.z())
+    
+    # Write vertex attributes
+    for prim in objnode.displayNode().geometry().prims():
+        nor = prim.normal()
+        verts = prim.vertices()
+        # Turn quad into two triangles
+        if len(verts) == 4:
+            write_vert(verts[0].point().position(), nor)
+            write_vert(verts[1].point().position(), nor)
+            write_vert(verts[2].point().position(), nor)
+            write_vert(verts[2].point().position(), nor)
+            write_vert(verts[3].point().position(), nor)
+            write_vert(verts[0].point().position(), nor)
+
+    # Write indices
+    for i in range(0, len(pa['values']) / 3):
+        ia['values'].append(i)
+
+    obj = {}
+    obj['type'] = 'mesh_object'
+    return obj
+
+def write_lamp(objnode, raw):
+
+    ld = {}
+    raw['lamp_datas'].append(ld)
+    ld['name'] = objnode.name() + '_data'
+    ld['type'] = 'point'
+    ld['color'] = [0.8, 0.8, 0.8]
+    ld['strength'] = 50
+    ld['cast_shadow'] = True
+    ld['near_plane'] = 0.1
+    ld['far_plane'] = 100
+    ld['shadows_bias'] = 0.0001
+    ld['fov'] = 1.5708
+    ld['shadowmap_cube'] = True
+
+    obj = {}
+    obj['type'] = 'lamp_object'
+    return obj
+
+def write_camera(objnode, raw):
+
+    cd = {}
+    raw['lamp_datas'].append(ld)
+    cd['name'] = objnode.name() + '_data'
+
+    obj = {}
+    obj['type'] = 'camera_object'
+    return obj
 
 def armory_export():
 
@@ -157,72 +239,29 @@ def armory_export():
     
     # Export scene objects
     for objnode in hou.node("/obj").children():
-        #! Assume meshes only for now
-        # Write mesh data of current object
-        md = {}
-        raw['mesh_datas'].append(md)
-        md['name'] = objnode.name() + '_data'
-        md['vertex_arrays'] = []
-        md['index_arrays'] = []
-        # Position array
-        pa = {}
-        pa['attrib'] = 'pos'
-        pa['values'] = []
-        md['vertex_arrays'].append(pa)
-        # Normal array
-        na = {}
-        na['attrib'] = 'nor'
-        na['values'] = []
-        md['vertex_arrays'].append(na)
-        # Index array
-        ia = {}
-        ia['material'] = 0
-        ia['values'] = []
-        md['index_arrays'].append(ia)
-        
-        def write_vert(pos, nor):
-            # Store position and normal into vertex arrays
-            pa['values'].append(pos.x())
-            pa['values'].append(pos.y())
-            pa['values'].append(pos.z())
-            na['values'].append(nor.x())
-            na['values'].append(nor.y())
-            na['values'].append(nor.z())
-        
-        # Write vertex attributes
-        for prim in objnode.displayNode().geometry().prims():
-            nor = prim.normal()
-            verts = prim.vertices()
-            # Turn quad into two triangles
-            if len(verts) == 4:
-                write_vert(verts[0].point().position(), nor)
-                write_vert(verts[1].point().position(), nor)
-                write_vert(verts[2].point().position(), nor)
-                write_vert(verts[2].point().position(), nor)
-                write_vert(verts[3].point().position(), nor)
-                write_vert(verts[0].point().position(), nor)
-    
-        # Write indices
-        for i in range(0, len(pa['values']) / 3):
-            ia['values'].append(i)
-        
+
+        if 'lamp' in str(objnode.type()):
+            obj = write_lamp(objnode, raw)
+        elif 'cam' in str(objnode.type()):
+            #obj = write_camera(objnode, raw)
+            pass
+        elif 'geo' in str(objnode.type()):
+            obj = write_mesh(objnode, raw)
+            # Assigned materials
+            matnode = None
+            for ref in objnode.references():
+                if type(ref) == hou.VopNode:
+                    matnode = ref
+                    break
+            if matnode != None:
+                mat = write_material(matnode)
+                raw['material_datas'].append(mat)
+                obj['material_refs'] = [matnode.name()]
+
         # Append current object
-        obj = {}
         raw['objects'].append(obj)
         obj['name'] = objnode.name()
-        obj['type'] = 'mesh_object'
-        # Reference to mesh data
         obj['data_ref'] = objnode.name() + '_data'
-        # Assigned materials
-        matnode = None
-        for ref in objnode.references():
-            if type(ref) == hou.VopNode:
-                matnode = ref
-                break
-        if matnode != None:
-            mat = write_material(matnode)
-            raw['material_datas'].append(mat)
-            obj['material_refs'] = [matnode.name()]
         obj['transform'] = {'values': write_matrix(objnode.worldTransform())}
     
     # Create camera data
